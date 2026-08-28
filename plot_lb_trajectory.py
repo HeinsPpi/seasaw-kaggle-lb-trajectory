@@ -85,7 +85,20 @@ def final_deadline(api: KaggleApi) -> pd.Timestamp:
         competitions = api.competition_list(search=COMPETITION, page_size=100) or []
     for competition in competitions:
         if str(getattr(competition, "ref", "")) == COMPETITION:
-            deadline = getattr(competition, "deadline", None)
+            # Simulation competitions may expose this under a camelCase or
+            # final-deadline field rather than the regular ``deadline``.
+            deadline = next(
+                (
+                    getattr(competition, name, None)
+                    for name in (
+                        "deadline",
+                        "final_submission_deadline",
+                        "finalSubmissionDeadline",
+                    )
+                    if getattr(competition, name, None)
+                ),
+                None,
+            )
             if deadline:
                 timestamp = pd.Timestamp(deadline)
                 return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
