@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
 import re
 import zipfile
@@ -32,12 +34,26 @@ def column(df: pd.DataFrame, *names: str) -> str | None:
 
 
 def find_team(api: KaggleApi) -> tuple[int, str]:
-    rows = api.competition_leaderboard_view(COMPETITION, page_size=200) or []
-    for row in rows:
-        if str(getattr(row, "team_name", "")).casefold() == TEAM_NAME.casefold():
-            return int(row.team_id), str(getattr(row, "team_name", TEAM_NAME))
+    # The client returns rows but prints the continuation token. Capture that
+    # diagnostic so we can walk every page without leaking it into CI logs.
+    page_token = None
+    for _ in range(100):
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stdout(diagnostic):
+            rows = api.competition_leaderboard_view(
+                COMPETITION, page_size=200, page_token=page_token
+            ) or []
+        if not rows:
+            break
+        for row in rows:
+            if str(getattr(row, "team_name", "")).casefold() == TEAM_NAME.casefold():
+                return int(row.team_id), str(getattr(row, "team_name", TEAM_NAME))
+        match = re.search(r"Next Page Token\s*=\s*(\S+)", diagnostic.getvalue())
+        if not match:
+            break
+        page_token = match.group(1)
     raise RuntimeError(
-        f"{TEAM_NAME!r} was not found in the first 200 leaderboard rows. "
+        f"{TEAM_NAME!r} was not found in the visible leaderboard. "
         "Use an account that can see the team leaderboard."
     )
 
