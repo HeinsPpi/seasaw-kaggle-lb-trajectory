@@ -23,6 +23,7 @@ TEAM_NAME = "Seasaw"
 DEFAULT_FINAL_SUBMISSION_DEADLINE = pd.Timestamp("2026-08-16T23:59:59Z")
 META_KAGGLE = "kaggle/meta-kaggle"
 EPISODE_AGENTS_FILE = "EpisodeAgents.csv"
+INTERNAL_EPISODES_URL = "https://www.kaggle.com/api/i/competitions.EpisodeService/ListEpisodes"
 RANGE_CHUNK_BYTES = 64 * 1024 * 1024
 RANGE_OVERLAP_BYTES = 16 * 1024
 MAX_RANGE_BYTES = 6 * 1024 * 1024 * 1024
@@ -100,6 +101,59 @@ def submission_episode_targets(
     return result
 
 
+def internal_episode_rating_history(submission_ids: set[str]) -> pd.DataFrame:
+    """Try Kaggle Web's episode endpoint with the configured API bearer token.
+
+    The endpoint is queried at most once per selected submission.  Some Kaggle
+    accounts accept API-token auth here; others require a browser/XSRF session,
+    in which case this returns an empty frame and Meta Kaggle is used.
+    """
+    token = os.environ.get("KAGGLE_API_TOKEN")
+    if not token:
+        return pd.DataFrame()
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "seasaw-lb-trajectory/1.0",
+    })
+    records = []
+    for submission_id in sorted(submission_ids):
+        response = session.post(
+            INTERNAL_EPISODES_URL,
+            json={"submissionId": submission_id},
+            timeout=60,
+        )
+        if response.status_code != 200:
+            print(
+                f"Kaggle EpisodeService token auth unavailable (HTTP {response.status_code})",
+                flush=True,
+            )
+            return pd.DataFrame()
+        for episode in response.json().get("episodes", []) or []:
+            timestamp = episode.get("endTime") or episode.get("createTime")
+            for agent in episode.get("agents", []) or []:
+                if str(agent.get("submissionId")) != submission_id:
+                    continue
+                score = agent.get("updatedScore")
+                if score is None:
+                    continue
+                records.append({
+                    "timestamp": timestamp,
+                    "submission_id": submission_id,
+                    "episode_id": str(episode.get("id")),
+                    "initial_score": agent.get("initialScore"),
+                    "score": score,
+                })
+    if not records:
+        return pd.DataFrame()
+    frame = pd.DataFrame(records)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame["score"] = pd.to_numeric(frame["score"], errors="coerce")
+    frame["initial_score"] = pd.to_numeric(frame["initial_score"], errors="coerce")
+    return frame.dropna(subset=["timestamp", "score"])
+
+
 def meta_kaggle_raw_url(api: KaggleApi) -> str:
     """Ask Kaggle Dataset API for a short-lived raw EpisodeAgents CSV URL."""
     request = ApiDownloadDatasetRequest()
@@ -149,6 +203,10 @@ def fetch_episode_rating_history(
     the scan has passed the oldest wanted EpisodeId.  No win/loss-derived score
     or current-rating snapshot is used.
     """
+    live = internal_episode_rating_history(submission_ids)
+    if not live.empty:
+        return live.sort_values(["timestamp", "episode_id"]).reset_index(drop=True)
+
     episode_targets = submission_episode_targets(api, submission_ids, deadline)
     wanted_episode_ids = set(episode_targets)
     oldest_episode_id = min(map(int, wanted_episode_ids))
