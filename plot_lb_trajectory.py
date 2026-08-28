@@ -79,7 +79,9 @@ def final_deadline(api: KaggleApi) -> pd.Timestamp:
     # response object; older clients used ``competition_list``/a plain list.
     list_method = getattr(api, "competitions_list", None)
     if list_method is not None:
-        response = list_method(search=COMPETITION, page_size=100)
+        # ``pokemon-tcg-ai-battle`` is closed; the default competition tab can
+        # omit closed competitions, so explicitly request all categories.
+        response = list_method(category="all", search=COMPETITION, page_size=100)
         competitions = getattr(response, "competitions", None) or []
     else:
         competitions = api.competition_list(search=COMPETITION, page_size=100) or []
