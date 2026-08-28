@@ -118,8 +118,17 @@ def final_deadline(api: KaggleApi) -> pd.Timestamp:
 
 def download_episode_agents(api: KaggleApi, directory: Path, submission_ids: set[str] | None = None) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
+    # Discover the exact published path first; some Kaggle environments expose
+    # this artifact with different casing or a directory prefix.
     try:
-        api.competition_download_file(COMPETITION, EPISODE_FILE, path=str(directory), force=False, quiet=True)
+        listing = api.competition_list_files(COMPETITION, page_size=100)
+        names = [str(getattr(item, "name", "")) for item in (getattr(listing, "files", None) or [])]
+        discovered = next((name for name in names if Path(name).name.casefold() == EPISODE_FILE.casefold()), None)
+        requested_file = discovered or EPISODE_FILE
+    except Exception:
+        requested_file = EPISODE_FILE
+    try:
+        api.competition_download_file(COMPETITION, requested_file, path=str(directory), force=False, quiet=True)
     except Exception as error:
         if submission_ids is None:
             raise
