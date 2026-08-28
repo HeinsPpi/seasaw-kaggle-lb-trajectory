@@ -123,6 +123,59 @@ def download_episode_agents(api: KaggleApi, directory: Path, submission_ids: set
     except Exception as error:
         if submission_ids is None:
             raise
+        # Official daily simulation datasets publish rating snapshots in a
+        # small manifest.csv. Prefer these over per-episode +/-1 rewards.
+        manifests = []
+        for dataset in api.dataset_list(search="pokemon-tcg-ai-battle-episodes", page=1) or []:
+            ref = str(getattr(dataset, "ref", ""))
+            if not ref or ref.endswith("-index"):
+                continue
+            match = re.search(r"(2026-\d{2}-\d{2})$", ref)
+            if not match:
+                continue
+            dataset_dir = directory / match.group(1)
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            target = dataset_dir / "manifest.csv"
+            try:
+                api.dataset_download_file(ref, "manifest.csv", path=str(dataset_dir), force=False, quiet=True)
+                archives = sorted(dataset_dir.glob("manifest.csv.zip"))
+                if archives:
+                    with zipfile.ZipFile(archives[-1]) as archive:
+                        archive.extract("manifest.csv", dataset_dir)
+                if target.exists():
+                    manifests.append(target)
+            except Exception:
+                continue
+        rating_rows = []
+        for manifest in manifests:
+            table = pd.read_csv(manifest)
+            norm_cols = {c: norm(c) for c in table.columns}
+            time_col = next((c for c, n in norm_cols.items() if n in {"createtime", "timestamp", "date"}), None)
+            if not time_col:
+                time_col = table.columns[0]
+            for _, record in table.iterrows():
+                timestamp = record[time_col]
+                for col, name in norm_cols.items():
+                    if "submission" not in name and "agent" not in name:
+                        continue
+                    sid = str(record[col])
+                    if sid not in submission_ids:
+                        continue
+                    groups = re.findall(r"\d+", name)
+                    score_col = next(
+                        (
+                            c for c, n in norm_cols.items()
+                            if ("rating" in n or "score" in n)
+                            and (not groups or any(g in n for g in groups))
+                        ),
+                        None,
+                    )
+                    if score_col is not None:
+                        rating_rows.append({"submissionId": sid, "episodeId": f"{manifest.stem}-{len(rating_rows)}", "createTime": timestamp, "updatedScore": record[score_col]})
+        if rating_rows:
+            path = directory / EPISODE_FILE
+            pd.DataFrame(rating_rows).to_parquet(path, index=False)
+            return path
         rows = []
         for submission_id in submission_ids:
             for episode in api.competition_list_episodes(int(submission_id)) or []:
@@ -173,11 +226,12 @@ def load_after_deadline(path: Path, deadline: pd.Timestamp, submission_ids: set[
         frame["episode_id"] = frame[episode_col].astype(str)
         frame = frame.drop_duplicates(["submission_id", "episode_id"], keep="last")
     frame = frame[["timestamp", "score", "submission_id"]].sort_values("timestamp")
-    # The episodes endpoint exposes per-game reward, not historical LB rating.
-    # Convert +/-1 rewards into a stable cumulative win-rate trajectory.
-    frame["score"] = frame.groupby("submission_id")["score"].transform(
-        lambda values: (values.gt(0).cumsum() / values.expanding().count())
-    )
+    # Legacy episode fallback contains +/-1 rewards; rating manifests contain
+    # absolute Elo-like values (hundreds). Preserve the latter as-is.
+    if frame["score"].abs().max() <= 1:
+        frame["score"] = frame.groupby("submission_id")["score"].transform(
+            lambda values: (values.gt(0).cumsum() / values.expanding().count())
+        )
     return frame
 
 
@@ -186,9 +240,9 @@ def plot(frame: pd.DataFrame, deadline: pd.Timestamp, output: Path) -> None:
     for submission_id, rows in frame.groupby("submission_id", sort=False):
         axis.plot(rows["timestamp"], rows["score"], marker=".", linewidth=1.5, label=f"Submission {submission_id}")
     axis.axvline(deadline, color="black", linestyle="--", linewidth=1, label="Final Submission Deadline")
-    axis.set_title("Seasaw — cumulative episode win rate after Final Submission Deadline")
+    axis.set_title("Seasaw — rating trajectory after Final Submission Deadline")
     axis.set_xlabel("Episode time (UTC)")
-    axis.set_ylabel("Cumulative episode win rate")
+    axis.set_ylabel("Rating")
     axis.grid(True, alpha=0.25)
     axis.legend()
     fig.savefig(output, dpi=180)

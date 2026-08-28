@@ -47,13 +47,13 @@ def render(site: Path) -> None:
     )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="600"><title>Seasaw episode win-rate trajectory</title>
+<meta http-equiv="refresh" content="600"><title>Seasaw rating trajectory</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}}img{{max-width:100%;height:auto;border:1px solid #ddd}}table{{border-collapse:collapse}}th,td{{padding:.45rem .8rem;border-bottom:1px solid #ddd;text-align:left}}small{{color:#666}}</style>
-</head><body><h1>Seasaw — cumulative episode win rate</h1>
+</head><body><h1>Seasaw — rating trajectory</h1>
 <p>Competition: <a href="https://www.kaggle.com/competitions/{COMPETITION}">{COMPETITION}</a><br>
 Final Submission Deadline: <code>{html.escape(deadline.isoformat())}</code><br>Latest active submissions: {links}</p>
-<img src="{image_name}" alt="Cumulative episode win-rate trajectory after Final Submission Deadline">
-<h2>Latest values</h2><table><thead><tr><th>Submission</th><th>Episodes</th><th>Cumulative win rate</th><th>Latest episode time</th></tr></thead><tbody>{rows}</tbody></table>
+<img src="{image_name}" alt="Rating trajectory after Final Submission Deadline">
+<h2>Latest values</h2><table><thead><tr><th>Submission</th><th>Episodes</th><th>Latest rating</th><th>Latest episode time</th></tr></thead><tbody>{rows}</tbody></table>
 <p><a href="{csv_name}">Download CSV</a></p><small>Updated {generated}. This page refreshes every 10 minutes; the GitHub Actions job also runs every 10 minutes.</small>
 </body></html>"""
     (site / "index.html").write_text(document, encoding="utf-8")
