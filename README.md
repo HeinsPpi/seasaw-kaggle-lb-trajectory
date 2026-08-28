@@ -1,8 +1,8 @@
 # Seasaw LB trajectory (public web)
 
-GitHub Actions上でKaggle公式APIを実行し、`pokemon-tcg-ai-battle`におけるSeasawの有効な直近2 submissionを取得します。各episode agentの`updatedScore`（対戦終了後のSkill Rating）を時刻順に描画し、GitHub Pagesで公開します。勝敗の±1や累積勝率、submissionの現在値を代用しません。Kaggle API tokenはActions内だけで使い、公開サイトへは出力しません。
+GitHub Actions上でKaggle公式APIを実行し、`pokemon-tcg-ai-battle`におけるSeasawの有効な直近2 submissionを取得します。Meta Kaggleの`EpisodeAgents.csv`にある`UpdatedScore`（対戦終了後のSkill Rating）を時刻順に描画し、GitHub Pagesで公開します。勝敗の±1や累積勝率、submissionの現在値を代用しません。Kaggle API tokenはActions内だけで使い、公開サイトへは出力しません。
 
-Meta Kaggleの`EpisodeAgents.csv`にも同じ`InitialScore` / `UpdatedScore`がありますが、現在約24GBある日次全量データです。このサイトでは10分更新を成立させるため、Kaggle CLIが利用するsubmission episode APIのJSONから該当する2 submissionだけを取得します。
+`EpisodeAgents.csv`は現在約24GBあるため、全量はダウンロードしません。まずsubmission episode APIで対象EpisodeIdと時刻を取得し、公式Dataset APIが返すraw CSVを末尾からRange Readして、対象2 submissionの行だけを抽出します。Meta Kaggle自体はKaggleにより日次更新されるため、新しいrating点の反映はその公開後になります。
 
 Kaggle公式ガイドでも、Simulation Competitionでは`team-submissions`で有効submissionを取得し、`episodes`でsubmissionのepisodeを確認する手順が案内されています。[公式ガイド](https://github.com/Kaggle/kaggle-cli/blob/main/docs/simulation_competitions.md)
 

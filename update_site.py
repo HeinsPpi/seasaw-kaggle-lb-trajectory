@@ -26,7 +26,7 @@ def render(site: Path) -> None:
     submission_ids = {submission_id for submission_id, _ in submissions}
     deadline = final_deadline(api)
     frame = load_after_deadline(
-        fetch_episode_rating_history(submission_ids), deadline, submission_ids
+        fetch_episode_rating_history(api, submission_ids, deadline), deadline, submission_ids
     )
 
     image_name = "lb_trajectory_after_deadline.png"
