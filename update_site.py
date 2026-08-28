@@ -43,7 +43,11 @@ def render(site: Path) -> None:
     frame = history.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
     frame["score"] = pd.to_numeric(frame["score"], errors="coerce")
-    frame = frame[(frame["timestamp"] >= deadline) & frame["score"].notna()]
+    frame = frame[
+        frame["submission_id"].astype(str).isin(submission_ids)
+        & (frame["timestamp"] >= deadline)
+        & frame["score"].notna()
+    ]
     if frame.empty:
         raise RuntimeError("No post-deadline EpisodeAgents rows matched the latest submissions")
 
