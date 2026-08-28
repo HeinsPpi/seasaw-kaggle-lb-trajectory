@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -34,6 +34,13 @@ jobs:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           FINAL_SUBMISSION_DEADLINE: ${{ vars.FINAL_SUBMISSION_DEADLINE }}
         run: python update_site.py
+      - name: Persist rating history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/rating_history.csv
+          git diff --cached --quiet || git commit -m "Update Kaggle rating history"
+          git push
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

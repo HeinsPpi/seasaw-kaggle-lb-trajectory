@@ -7,6 +7,7 @@ import html
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+import pandas as pd
 
 from kaggle.api.kaggle_api_extended import KaggleApi
 
@@ -24,10 +25,25 @@ def render(site: Path) -> None:
     team_id, _ = find_team(api)
     submissions = latest_submissions(api, team_id)
     submission_ids = {submission_id for submission_id, _ in submissions}
+    # Persist the actual current public rating observed from Kaggle. The
+    # workflow commits this file, producing a genuine rating time series.
+    history_path = Path("data/rating_history.csv")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history = pd.read_csv(history_path) if history_path.exists() else pd.DataFrame(columns=["timestamp", "submission_id", "score"])
+    observed = pd.DataFrame([
+        {"timestamp": datetime.now(timezone.utc).isoformat(), "submission_id": sid,
+         "score": pd.to_numeric(getattr(row, "public_score", None), errors="coerce")}
+        for sid, row in submissions
+    ]).dropna(subset=["score"])
+    if not observed.empty:
+        history = pd.concat([history, observed], ignore_index=True)
+        history = history.drop_duplicates(["timestamp", "submission_id"], keep="last")
+        history.to_csv(history_path, index=False)
     deadline = final_deadline(api)
-    with tempfile.TemporaryDirectory() as temporary:
-        parquet = download_episode_agents(api, Path(temporary), submission_ids)
-        frame = load_after_deadline(parquet, deadline, submission_ids)
+    frame = history.copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame["score"] = pd.to_numeric(frame["score"], errors="coerce")
+    frame = frame[(frame["timestamp"] >= deadline) & frame["score"].notna()]
     if frame.empty:
         raise RuntimeError("No post-deadline EpisodeAgents rows matched the latest submissions")
 
