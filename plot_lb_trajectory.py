@@ -172,7 +172,13 @@ def load_after_deadline(path: Path, deadline: pd.Timestamp, submission_ids: set[
     if episode_col:
         frame["episode_id"] = frame[episode_col].astype(str)
         frame = frame.drop_duplicates(["submission_id", "episode_id"], keep="last")
-    return frame[["timestamp", "score", "submission_id"]].sort_values("timestamp")
+    frame = frame[["timestamp", "score", "submission_id"]].sort_values("timestamp")
+    # The episodes endpoint exposes per-game reward, not historical LB rating.
+    # Convert +/-1 rewards into a stable cumulative win-rate trajectory.
+    frame["score"] = frame.groupby("submission_id")["score"].transform(
+        lambda values: (values.gt(0).cumsum() / values.expanding().count())
+    )
+    return frame
 
 
 def plot(frame: pd.DataFrame, deadline: pd.Timestamp, output: Path) -> None:
@@ -180,9 +186,9 @@ def plot(frame: pd.DataFrame, deadline: pd.Timestamp, output: Path) -> None:
     for submission_id, rows in frame.groupby("submission_id", sort=False):
         axis.plot(rows["timestamp"], rows["score"], marker=".", linewidth=1.5, label=f"Submission {submission_id}")
     axis.axvline(deadline, color="black", linestyle="--", linewidth=1, label="Final Submission Deadline")
-    axis.set_title("Seasaw — LB trajectory after Final Submission Deadline")
+    axis.set_title("Seasaw — cumulative episode win rate after Final Submission Deadline")
     axis.set_xlabel("Episode time (UTC)")
-    axis.set_ylabel("EpisodeAgents score / rating")
+    axis.set_ylabel("Cumulative episode win rate")
     axis.grid(True, alpha=0.25)
     axis.legend()
     fig.savefig(output, dpi=180)
