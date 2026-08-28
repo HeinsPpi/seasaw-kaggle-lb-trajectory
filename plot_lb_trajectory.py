@@ -19,6 +19,9 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 COMPETITION = "pokemon-tcg-ai-battle"
 TEAM_NAME = "Seasaw"
 EPISODE_FILE = "EpisodeAgents.parquet"
+# Kaggle's public competition page specifies 2026-08-16 23:59 UTC.  The
+# simulation API currently omits this field for the closed competition.
+DEFAULT_FINAL_SUBMISSION_DEADLINE = pd.Timestamp("2026-08-16T23:59:59Z")
 
 
 def norm(value: object) -> str:
@@ -108,10 +111,9 @@ def final_deadline(api: KaggleApi) -> pd.Timestamp:
     if configured:
         timestamp = pd.Timestamp(configured)
         return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
-    raise RuntimeError(
-        "Final Submission Deadline was not returned by the Kaggle API. "
-        "Set FINAL_SUBMISSION_DEADLINE=YYYY-MM-DDTHH:MM:SSZ and rerun."
-    )
+    # Keep the scheduled dashboard running even when Kaggle omits the field.
+    # An Actions variable can override this if the organizers revise dates.
+    return DEFAULT_FINAL_SUBMISSION_DEADLINE
 
 
 def download_episode_agents(api: KaggleApi, directory: Path) -> Path:
