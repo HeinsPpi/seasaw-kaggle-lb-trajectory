@@ -26,7 +26,7 @@ def render(site: Path) -> None:
     submission_ids = {submission_id for submission_id, _ in submissions}
     deadline = final_deadline(api)
     with tempfile.TemporaryDirectory() as temporary:
-        parquet = download_episode_agents(api, Path(temporary))
+        parquet = download_episode_agents(api, Path(temporary), submission_ids)
         frame = load_after_deadline(parquet, deadline, submission_ids)
     if frame.empty:
         raise RuntimeError("No post-deadline EpisodeAgents rows matched the latest submissions")

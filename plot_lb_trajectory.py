@@ -116,9 +116,30 @@ def final_deadline(api: KaggleApi) -> pd.Timestamp:
     return DEFAULT_FINAL_SUBMISSION_DEADLINE
 
 
-def download_episode_agents(api: KaggleApi, directory: Path) -> Path:
+def download_episode_agents(api: KaggleApi, directory: Path, submission_ids: set[str] | None = None) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    api.competition_download_file(COMPETITION, EPISODE_FILE, path=str(directory), force=False, quiet=True)
+    try:
+        api.competition_download_file(COMPETITION, EPISODE_FILE, path=str(directory), force=False, quiet=True)
+    except Exception as error:
+        if submission_ids is None:
+            raise
+        rows = []
+        for submission_id in submission_ids:
+            for episode in api.competition_list_episodes(int(submission_id)) or []:
+                for agent in getattr(episode, "agents", None) or []:
+                    if str(getattr(agent, "submission_id", "")) != str(submission_id):
+                        continue
+                    rows.append({
+                        "submissionId": str(submission_id),
+                        "episodeId": str(getattr(episode, "id", "")),
+                        "createTime": getattr(episode, "create_time", None),
+                        "updatedScore": getattr(agent, "reward", None),
+                    })
+        if rows:
+            path = directory / EPISODE_FILE
+            pd.DataFrame(rows).to_parquet(path, index=False)
+            return path
+        raise error
     parquet = directory / EPISODE_FILE
     if parquet.exists():
         return parquet
