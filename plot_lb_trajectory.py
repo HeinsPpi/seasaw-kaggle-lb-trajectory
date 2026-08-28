@@ -75,7 +75,14 @@ def latest_submissions(api: KaggleApi, team_id: int) -> list[tuple[str, object]]
 
 
 def final_deadline(api: KaggleApi) -> pd.Timestamp:
-    competitions = api.competition_list(search=COMPETITION, page_size=100) or []
+    # kaggle 2.x names this method ``competitions_list`` and returns a
+    # response object; older clients used ``competition_list``/a plain list.
+    list_method = getattr(api, "competitions_list", None)
+    if list_method is not None:
+        response = list_method(search=COMPETITION, page_size=100)
+        competitions = getattr(response, "competitions", None) or []
+    else:
+        competitions = api.competition_list(search=COMPETITION, page_size=100) or []
     for competition in competitions:
         if str(getattr(competition, "ref", "")) == COMPETITION:
             deadline = getattr(competition, "deadline", None)
