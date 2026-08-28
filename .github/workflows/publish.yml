@@ -2,7 +2,10 @@ name: Publish Seasaw LB graph
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # Avoid :00/:10/... where GitHub's scheduler is most heavily delayed.
+    - cron: "3,13,23,33,43,53 * * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
