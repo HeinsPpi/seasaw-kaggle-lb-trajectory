@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot Seasaw's two latest submission ratings after the final deadline."""
+"""Plot the per-episode skill rating of Seasaw's latest two submissions."""
 
 from __future__ import annotations
 
@@ -8,37 +8,21 @@ import contextlib
 import io
 import os
 import re
-import zipfile
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import requests
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 
 COMPETITION = "pokemon-tcg-ai-battle"
 TEAM_NAME = "Seasaw"
-EPISODE_FILE = "EpisodeAgents.parquet"
-# Kaggle's public competition page specifies 2026-08-16 23:59 UTC.  The
-# simulation API currently omits this field for the closed competition.
 DEFAULT_FINAL_SUBMISSION_DEADLINE = pd.Timestamp("2026-08-16T23:59:59Z")
-
-
-def norm(value: object) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value).lower())
-
-
-def column(df: pd.DataFrame, *names: str) -> str | None:
-    wanted = {norm(name) for name in names}
-    for name in df.columns:
-        if norm(name) in wanted:
-            return name
-    return None
+EPISODES_URL = "https://www.kaggle.com/api/v1/competitions/submissions/{submission_id}/episodes"
 
 
 def find_team(api: KaggleApi) -> tuple[int, str]:
-    # The client returns rows but prints the continuation token. Capture that
-    # diagnostic so we can walk every page without leaking it into CI logs.
     page_token = None
     for _ in range(100):
         diagnostic = io.StringIO()
@@ -55,203 +39,123 @@ def find_team(api: KaggleApi) -> tuple[int, str]:
         if not match:
             break
         page_token = match.group(1)
-    raise RuntimeError(
-        f"{TEAM_NAME!r} was not found in the visible leaderboard. "
-        "Use an account that can see the team leaderboard."
-    )
+    raise RuntimeError(f"{TEAM_NAME!r} was not found in the visible leaderboard")
 
 
 def latest_submissions(api: KaggleApi, team_id: int) -> list[tuple[str, object]]:
-    rows = api.competition_team_submissions(team_id) or []
-    rows = [row for row in rows if getattr(row, "id", None) is not None]
-    def submitted_at(row: object) -> float:
-        value = getattr(row, "date_submitted", None)
-        if value is None:
-            return float("-inf")
-        timestamp = pd.Timestamp(value)
-        return timestamp.timestamp()
-
-    rows.sort(key=submitted_at)
+    rows = [
+        row for row in (api.competition_team_submissions(team_id) or [])
+        if getattr(row, "id", None) is not None
+    ]
+    rows.sort(
+        key=lambda row: pd.Timestamp(getattr(row, "date_submitted", 0)).timestamp()
+        if getattr(row, "date_submitted", None) else float("-inf")
+    )
     if len(rows) < 2:
         raise RuntimeError(f"Only {len(rows)} active submission(s) found for {TEAM_NAME}")
     return [(str(row.id), row) for row in rows[-2:]]
 
 
 def final_deadline(api: KaggleApi) -> pd.Timestamp:
-    # kaggle 2.x names this method ``competitions_list`` and returns a
-    # response object; older clients used ``competition_list``/a plain list.
-    list_method = getattr(api, "competitions_list", None)
-    if list_method is not None:
-        # ``pokemon-tcg-ai-battle`` is closed; the default competition tab can
-        # omit closed competitions, so explicitly request all categories.
-        response = list_method(category="all", search=COMPETITION, page_size=100)
-        competitions = getattr(response, "competitions", None) or []
-    else:
-        competitions = api.competition_list(search=COMPETITION, page_size=100) or []
-    for competition in competitions:
-        if str(getattr(competition, "ref", "")) == COMPETITION:
-            # Simulation competitions may expose this under a camelCase or
-            # final-deadline field rather than the regular ``deadline``.
-            deadline = next(
-                (
-                    getattr(competition, name, None)
-                    for name in (
-                        "deadline",
-                        "final_submission_deadline",
-                        "finalSubmissionDeadline",
-                    )
-                    if getattr(competition, name, None)
-                ),
-                None,
-            )
-            if deadline:
-                timestamp = pd.Timestamp(deadline)
-                return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
     configured = os.environ.get("FINAL_SUBMISSION_DEADLINE")
     if configured:
-        timestamp = pd.Timestamp(configured)
-        return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
-    # Keep the scheduled dashboard running even when Kaggle omits the field.
-    # An Actions variable can override this if the organizers revise dates.
+        value = pd.Timestamp(configured)
+        return value.tz_localize("UTC") if value.tzinfo is None else value.tz_convert("UTC")
     return DEFAULT_FINAL_SUBMISSION_DEADLINE
 
 
-def download_episode_agents(api: KaggleApi, directory: Path, submission_ids: set[str] | None = None) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    # Discover the exact published path first; some Kaggle environments expose
-    # this artifact with different casing or a directory prefix.
-    try:
-        listing = api.competition_list_files(COMPETITION, page_size=100)
-        names = [str(getattr(item, "name", "")) for item in (getattr(listing, "files", None) or [])]
-        discovered = next((name for name in names if Path(name).name.casefold() == EPISODE_FILE.casefold()), None)
-        requested_file = discovered or EPISODE_FILE
-    except Exception:
-        requested_file = EPISODE_FILE
-    try:
-        api.competition_download_file(COMPETITION, requested_file, path=str(directory), force=False, quiet=True)
-    except Exception as error:
-        if submission_ids is None:
-            raise
-        # Official daily simulation datasets publish rating snapshots in a
-        # small manifest.csv. Prefer these over per-episode +/-1 rewards.
-        manifests = []
-        for dataset in api.dataset_list(search="pokemon-tcg-ai-battle-episodes", page=1) or []:
-            ref = str(getattr(dataset, "ref", ""))
-            if not ref or ref.endswith("-index"):
-                continue
-            match = re.search(r"(2026-\d{2}-\d{2})$", ref)
-            if not match:
-                continue
-            dataset_dir = directory / match.group(1)
-            dataset_dir.mkdir(parents=True, exist_ok=True)
-            target = dataset_dir / "manifest.csv"
-            try:
-                api.dataset_download_file(ref, "manifest.csv", path=str(dataset_dir), force=False, quiet=True)
-                archives = sorted(dataset_dir.glob("manifest.csv.zip"))
-                if archives:
-                    with zipfile.ZipFile(archives[-1]) as archive:
-                        archive.extract("manifest.csv", dataset_dir)
-                if target.exists():
-                    manifests.append(target)
-            except Exception:
-                continue
-        rating_rows = []
-        for manifest in manifests:
-            table = pd.read_csv(manifest)
-            norm_cols = {c: norm(c) for c in table.columns}
-            time_col = next((c for c, n in norm_cols.items() if n in {"createtime", "timestamp", "date"}), None)
-            if not time_col:
-                time_col = table.columns[0]
-            for _, record in table.iterrows():
-                timestamp = record[time_col]
-                for col, name in norm_cols.items():
-                    if "submission" not in name and "agent" not in name:
-                        continue
-                    sid = str(record[col])
-                    if sid not in submission_ids:
-                        continue
-                    groups = re.findall(r"\d+", name)
-                    score_col = next(
-                        (
-                            c for c, n in norm_cols.items()
-                            if ("rating" in n or "score" in n)
-                            and (not groups or any(g in n for g in groups))
-                        ),
-                        None,
-                    )
-                    if score_col is not None:
-                        rating_rows.append({"submissionId": sid, "episodeId": f"{manifest.stem}-{len(rating_rows)}", "createTime": timestamp, "updatedScore": record[score_col]})
-        if rating_rows:
-            path = directory / EPISODE_FILE
-            pd.DataFrame(rating_rows).to_parquet(path, index=False)
-            return path
-        rows = []
-        for submission_id in submission_ids:
-            for episode in api.competition_list_episodes(int(submission_id)) or []:
-                for agent in getattr(episode, "agents", None) or []:
-                    if str(getattr(agent, "submission_id", "")) != str(submission_id):
-                        continue
-                    rows.append({
-                        "submissionId": str(submission_id),
-                        "episodeId": str(getattr(episode, "id", "")),
-                        "createTime": getattr(episode, "create_time", None),
-                        "updatedScore": getattr(agent, "reward", None),
-                    })
-        if rows:
-            path = directory / EPISODE_FILE
-            pd.DataFrame(rows).to_parquet(path, index=False)
-            return path
-        raise error
-    parquet = directory / EPISODE_FILE
-    if parquet.exists():
-        return parquet
-    archives = sorted(directory.glob("*.zip"))
-    if archives:
-        with zipfile.ZipFile(archives[-1]) as archive:
-            archive.extractall(directory)
-        if parquet.exists():
-            return parquet
-    raise FileNotFoundError(f"{EPISODE_FILE} was not found in {directory}")
+def _first(mapping: dict, *names: str):
+    for name in names:
+        if name in mapping and mapping[name] is not None:
+            return mapping[name]
+    return None
 
 
-def load_after_deadline(path: Path, deadline: pd.Timestamp, submission_ids: set[str]) -> pd.DataFrame:
-    frame = pd.read_parquet(path)
-    submission_col = column(frame, "submissionId", "submissionRef", "agentSubmissionId")
-    time_col = column(frame, "createTime", "episodeCreateTime", "timestamp", "date", "endTime")
-    score_col = column(frame, "updatedScore", "score", "ratingAfter", "eloAfter", "publicScore")
-    if not submission_col or not time_col or not score_col:
+def fetch_episode_rating_history(submission_ids: set[str]) -> pd.DataFrame:
+    """Read absolute post-episode ratings from Kaggle's official episode API.
+
+    Kaggle CLI's generated ``ApiEpisodeAgent`` currently omits score fields
+    while parsing the response.  The API response itself carries the simulation
+    fields ``initialScore`` and ``updatedScore``.  Reading the JSON before the
+    generated-model conversion preserves the rating trajectory.
+    """
+    token = os.environ.get("KAGGLE_API_TOKEN")
+    if not token:
+        raise RuntimeError("KAGGLE_API_TOKEN is not set")
+
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "seasaw-lb-trajectory/1.0",
+    })
+    records: list[dict] = []
+    for submission_id in sorted(submission_ids):
+        response = session.get(
+            EPISODES_URL.format(submission_id=submission_id), timeout=60
+        )
+        response.raise_for_status()
+        payload = response.json()
+        episodes = payload.get("episodes", payload if isinstance(payload, list) else [])
+        for episode in episodes:
+            timestamp = _first(episode, "endTime", "end_time", "createTime", "create_time")
+            episode_id = _first(episode, "id", "episodeId", "episode_id")
+            for agent in episode.get("agents", []) or []:
+                agent_submission = _first(agent, "submissionId", "submission_id")
+                if str(agent_submission) != submission_id:
+                    continue
+                updated_score = _first(agent, "updatedScore", "updated_score")
+                initial_score = _first(agent, "initialScore", "initial_score")
+                if updated_score is None:
+                    continue
+                records.append({
+                    "timestamp": timestamp,
+                    "submission_id": submission_id,
+                    "episode_id": str(episode_id),
+                    "initial_score": initial_score,
+                    "score": updated_score,
+                })
+
+    if not records:
         raise RuntimeError(
-            "Could not infer EpisodeAgents.parquet columns. "
-            f"Columns: {', '.join(map(str, frame.columns))}"
+            "Kaggle returned episodes, but no updatedScore values. "
+            "Do not substitute win/loss rewards: they are not leaderboard ratings."
         )
+    frame = pd.DataFrame(records)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    frame["score"] = pd.to_numeric(frame["score"], errors="coerce")
+    frame["initial_score"] = pd.to_numeric(frame["initial_score"], errors="coerce")
+    frame = frame.dropna(subset=["timestamp", "score"])
+    frame = frame.drop_duplicates(["submission_id", "episode_id"], keep="last")
+    return frame.sort_values(["timestamp", "episode_id"]).reset_index(drop=True)
 
-    frame = frame[frame[submission_col].astype(str).isin(submission_ids)].copy()
-    frame["timestamp"] = pd.to_datetime(frame[time_col], utc=True, errors="coerce")
-    frame["score"] = pd.to_numeric(frame[score_col], errors="coerce")
-    frame = frame[(frame["timestamp"] >= deadline) & frame["score"].notna()].copy()
-    frame["submission_id"] = frame[submission_col].astype(str)
-    episode_col = column(frame, "episodeId", "episodeRef", "id")
-    if episode_col:
-        frame["episode_id"] = frame[episode_col].astype(str)
-        frame = frame.drop_duplicates(["submission_id", "episode_id"], keep="last")
-    frame = frame[["timestamp", "score", "submission_id"]].sort_values("timestamp")
-    # Legacy episode fallback contains +/-1 rewards; rating manifests contain
-    # absolute Elo-like values (hundreds). Preserve the latter as-is.
-    if frame["score"].abs().max() <= 1:
-        frame["score"] = frame.groupby("submission_id")["score"].transform(
-            lambda values: (values.gt(0).cumsum() / values.expanding().count())
-        )
-    return frame
+
+def load_after_deadline(
+    frame: pd.DataFrame, deadline: pd.Timestamp, submission_ids: set[str]
+) -> pd.DataFrame:
+    result = frame[
+        frame["submission_id"].astype(str).isin(submission_ids)
+        & (frame["timestamp"] >= deadline)
+    ].copy()
+    if result.empty:
+        raise RuntimeError("No post-deadline rating rows matched the latest submissions")
+    return result.sort_values("timestamp")
 
 
 def plot(frame: pd.DataFrame, deadline: pd.Timestamp, output: Path) -> None:
     fig, axis = plt.subplots(figsize=(12, 6.5), constrained_layout=True)
     for submission_id, rows in frame.groupby("submission_id", sort=False):
-        axis.plot(rows["timestamp"], rows["score"], marker=".", linewidth=1.5, label=f"Submission {submission_id}")
-    axis.axvline(deadline, color="black", linestyle="--", linewidth=1, label="Final Submission Deadline")
-    axis.set_title("Seasaw — rating trajectory after Final Submission Deadline")
+        axis.plot(
+            rows["timestamp"], rows["score"], marker=".", linewidth=1.5,
+            label=f"Submission {submission_id}",
+        )
+    axis.axvline(
+        deadline, color="black", linestyle="--", linewidth=1,
+        label="Final Submission Deadline",
+    )
+    axis.set_title("Seasaw — per-episode Kaggle skill rating")
     axis.set_xlabel("Episode time (UTC)")
-    axis.set_ylabel("Rating")
+    axis.set_ylabel("Updated skill rating")
     axis.grid(True, alpha=0.25)
     axis.legend()
     fig.savefig(output, dpi=180)
@@ -261,7 +165,6 @@ def plot(frame: pd.DataFrame, deadline: pd.Timestamp, output: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, default=Path("lb_trajectory"))
-    parser.add_argument("--parquet", type=Path, help="Use an existing EpisodeAgents.parquet")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,17 +174,12 @@ def main() -> None:
     submissions = latest_submissions(api, team_id)
     submission_ids = {submission_id for submission_id, _ in submissions}
     deadline = final_deadline(api)
-    parquet = args.parquet or download_episode_agents(api, args.output_dir / "data")
-    frame = load_after_deadline(parquet, deadline, submission_ids)
-    if frame.empty:
-        raise RuntimeError("No post-deadline EpisodeAgents rows matched the two latest submissions")
+    frame = load_after_deadline(
+        fetch_episode_rating_history(submission_ids), deadline, submission_ids
+    )
     frame.to_csv(args.output_dir / "lb_trajectory_after_deadline.csv", index=False)
     plot(frame, deadline, args.output_dir / "lb_trajectory_after_deadline.png")
-    print(f"team={TEAM_NAME} team_id={team_id}")
-    print(f"submissions={', '.join(sorted(submission_ids))}")
-    print(f"deadline={deadline.isoformat()}")
-    print(f"rows={len(frame)}")
-    print(f"png={args.output_dir / 'lb_trajectory_after_deadline.png'}")
+    print(f"team={TEAM_NAME} team_id={team_id} rows={len(frame)}")
 
 
 if __name__ == "__main__":

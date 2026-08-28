@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Fetch Kaggle data and render the public GitHub Pages dashboard."""
+"""Fetch Kaggle episode ratings and render the GitHub Pages dashboard."""
 
 from __future__ import annotations
 
 import html
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-import pandas as pd
 
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 from plot_lb_trajectory import (
-    COMPETITION, TEAM_NAME, download_episode_agents, final_deadline,
+    COMPETITION, TEAM_NAME, fetch_episode_rating_history, final_deadline,
     find_team, latest_submissions, load_after_deadline, plot,
 )
 
@@ -20,45 +18,27 @@ from plot_lb_trajectory import (
 def render(site: Path) -> None:
     site.mkdir(parents=True, exist_ok=True)
     (site / ".nojekyll").write_text("", encoding="utf-8")
+
     api = KaggleApi()
     api.authenticate()
     team_id, _ = find_team(api)
     submissions = latest_submissions(api, team_id)
     submission_ids = {submission_id for submission_id, _ in submissions}
-    # Persist the actual current public rating observed from Kaggle. The
-    # workflow commits this file, producing a genuine rating time series.
-    history_path = Path("data/rating_history.csv")
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history = pd.read_csv(history_path) if history_path.exists() else pd.DataFrame(columns=["timestamp", "submission_id", "score"])
-    observed = pd.DataFrame([
-        {"timestamp": datetime.now(timezone.utc).isoformat(), "submission_id": sid,
-         "score": pd.to_numeric(getattr(row, "public_score", None), errors="coerce")}
-        for sid, row in submissions
-    ]).dropna(subset=["score"])
-    if not observed.empty:
-        history = pd.concat([history, observed], ignore_index=True)
-        history = history.drop_duplicates(["timestamp", "submission_id"], keep="last")
-        history.to_csv(history_path, index=False)
     deadline = final_deadline(api)
-    frame = history.copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
-    frame["score"] = pd.to_numeric(frame["score"], errors="coerce")
-    frame = frame[
-        frame["submission_id"].astype(str).isin(submission_ids)
-        & (frame["timestamp"] >= deadline)
-        & frame["score"].notna()
-    ]
-    if frame.empty:
-        raise RuntimeError("No post-deadline EpisodeAgents rows matched the latest submissions")
+    frame = load_after_deadline(
+        fetch_episode_rating_history(submission_ids), deadline, submission_ids
+    )
 
     image_name = "lb_trajectory_after_deadline.png"
     csv_name = "lb_trajectory_after_deadline.csv"
     frame.to_csv(site / csv_name, index=False)
     plot(frame, deadline, site / image_name)
+
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     rows = "".join(
         f"<tr><td>{html.escape(submission_id)}</td><td>{len(group)}</td>"
-        f"<td>{group['score'].iloc[-1]:.3f}</td><td>{html.escape(group['timestamp'].iloc[-1].isoformat())}</td></tr>"
+        f"<td>{group['score'].iloc[-1]:.2f}</td>"
+        f"<td>{html.escape(group['timestamp'].iloc[-1].isoformat())}</td></tr>"
         for submission_id, group in frame.groupby("submission_id", sort=False)
     )
     links = " / ".join(
@@ -72,9 +52,9 @@ def render(site: Path) -> None:
 </head><body><h1>Seasaw — rating trajectory</h1>
 <p>Competition: <a href="https://www.kaggle.com/competitions/{COMPETITION}">{COMPETITION}</a><br>
 Final Submission Deadline: <code>{html.escape(deadline.isoformat())}</code><br>Latest active submissions: {links}</p>
-<img src="{image_name}" alt="Rating trajectory after Final Submission Deadline">
+<img src="{image_name}" alt="Per-episode Kaggle skill rating trajectory">
 <h2>Latest values</h2><table><thead><tr><th>Submission</th><th>Episodes</th><th>Latest rating</th><th>Latest episode time</th></tr></thead><tbody>{rows}</tbody></table>
-<p><a href="{csv_name}">Download CSV</a></p><small>Updated {generated}. This page refreshes every 10 minutes; the GitHub Actions job also runs every 10 minutes.</small>
+<p><a href="{csv_name}">Download CSV</a></p><small>Updated {generated}. Auto-refresh: 10 minutes. Values are each episode agent's Kaggle updatedScore, not win/loss or cumulative win rate.</small>
 </body></html>"""
     (site / "index.html").write_text(document, encoding="utf-8")
 
