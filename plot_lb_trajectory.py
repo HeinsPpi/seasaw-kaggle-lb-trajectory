@@ -70,17 +70,31 @@ def final_deadline(api: KaggleApi) -> pd.Timestamp:
     return DEFAULT_FINAL_SUBMISSION_DEADLINE
 
 
-def submission_episode_times(
+def submission_episode_targets(
     api: KaggleApi, submission_ids: set[str], deadline: pd.Timestamp
-) -> dict[str, pd.Timestamp]:
-    """Get the small EpisodeId→time index through the official competition API."""
-    result: dict[str, pd.Timestamp] = {}
+) -> dict[str, dict]:
+    """Get EpisodeId, timestamp and our agent index from competition API."""
+    result: dict[str, dict] = {}
     for submission_id in sorted(submission_ids):
         for episode in api.competition_list_episodes(int(submission_id)) or []:
             timestamp = getattr(episode, "end_time", None) or getattr(episode, "create_time", None)
             timestamp = pd.to_datetime(timestamp, utc=True, errors="coerce")
-            if pd.notna(timestamp) and timestamp >= deadline:
-                result[str(episode.id)] = timestamp
+            if pd.isna(timestamp) or timestamp < deadline:
+                continue
+            agent_index = next(
+                (
+                    int(agent.index)
+                    for agent in (getattr(episode, "agents", None) or [])
+                    if str(getattr(agent, "submission_id", "")) == submission_id
+                ),
+                None,
+            )
+            if agent_index is not None:
+                result[str(episode.id)] = {
+                    "timestamp": timestamp,
+                    "submission_id": submission_id,
+                    "index": str(agent_index),
+                }
     if not result:
         raise RuntimeError("Kaggle returned no post-deadline episodes for the latest submissions")
     return result
@@ -135,8 +149,8 @@ def fetch_episode_rating_history(
     the scan has passed the oldest wanted EpisodeId.  No win/loss-derived score
     or current-rating snapshot is used.
     """
-    episode_times = submission_episode_times(api, submission_ids, deadline)
-    wanted_episode_ids = set(episode_times)
+    episode_targets = submission_episode_targets(api, submission_ids, deadline)
+    wanted_episode_ids = set(episode_targets)
     oldest_episode_id = min(map(int, wanted_episode_ids))
     url = meta_kaggle_raw_url(api)
     session = requests.Session()
@@ -165,18 +179,23 @@ def fetch_episode_rating_history(
         last = None if request_end == total_bytes - 1 else -1
         complete_lines = lines[first:last]
         for line in complete_lines:
-            if not any(f",{submission_id}," in line for submission_id in submission_ids):
+            # EpisodeAgents' relational key is (EpisodeId, Index).  Join on
+            # that public key instead of relying on a textual SubmissionId
+            # representation in the 24GB dump.
+            prefix = line.split(",", 3)
+            if len(prefix) < 3:
+                continue
+            episode_id, agent_index = prefix[1], prefix[2]
+            target = episode_targets.get(episode_id)
+            if target is None or agent_index != target["index"]:
                 continue
             values = next(csv.reader([line]))
             if len(values) != len(columns):
                 continue
             row = dict(zip(columns, values))
-            episode_id = row["EpisodeId"]
-            submission_id = row["SubmissionId"]
-            if episode_id not in wanted_episode_ids or submission_id not in submission_ids:
-                continue
+            submission_id = target["submission_id"]
             records[(submission_id, episode_id)] = {
-                "timestamp": episode_times[episode_id],
+                "timestamp": target["timestamp"],
                 "submission_id": submission_id,
                 "episode_id": episode_id,
                 "initial_score": row["InitialScore"],
